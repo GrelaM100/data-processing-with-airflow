@@ -81,7 +81,7 @@ def _upload_dataframe_to_blob(df: pd.DataFrame, filename: str) -> None:
     parquet_file = BytesIO()
     df.to_parquet(parquet_file, engine='pyarrow')
     parquet_file.seek(0)
-    blob_service_client.upload_blob(data=parquet_file)
+    blob_service_client.upload_blob(data=parquet_file, overwrite=True)
 
 
 def _extract_geoapi_data(extractor_id: str) -> pd.DataFrame:
@@ -99,16 +99,13 @@ def _extract_geoapi_data(extractor_id: str) -> pd.DataFrame:
     return df.to_json(orient='records')
 
 
-def _transform_and_load_geoapi_data(ti) -> pd.DataFrame:
+def _transform_geoapi_data(ti) -> pd.DataFrame:
     geoapi_data = ti.xcom_pull(task_ids=[
         'geoapi_extract_transform_load.geoapi_extractor_1',
         'geoapi_extract_transform_load.geoapi_extractor_2',
         'geoapi_extract_transform_load.geoapi_extractor_3',
         'geoapi_extract_transform_load.geoapi_extractor_4'
     ])
-
-    print("KKK")
-    print(geoapi_data)
 
     df: pd.DataFrame = pd.DataFrame([])
     df_extractor_data: pd.DataFrame
@@ -117,9 +114,24 @@ def _transform_and_load_geoapi_data(ti) -> pd.DataFrame:
         df_extractor_data = pd.read_json(extractor_data, orient='records')
         df = pd.concat([df, df_extractor_data], axis=0)
 
-    df.sort_values('population', ascending=False).reset_index(drop=True)
+    df = df.sort_values('population', ascending=False).reset_index(drop=True)
+    print(df.head(50))
 
     _upload_dataframe_to_blob(df, filename=f"geoapi_transformed")
+
+
+def _fetch_representative_locations() -> pd.DataFrame:
+    from io import BytesIO
+    filename = "geoapi_transformed.parquet"
+    blob_service_client = _get_blob_service_client(filename=filename)
+    with BytesIO() as input_blob:
+        blob_service_client.download_blob().download_to_stream(input_blob)
+        input_blob.seek(0)
+        df = pd.read_parquet(input_blob)
+    
+    print(df.head(50))
+    df_representative = df[:100]
+    return df_representative.to_json(orient='records')
 
 
 with DAG(
@@ -143,22 +155,23 @@ with DAG(
 
         transformer = PythonOperator(
             task_id=f"geoapi_transformer",
-            python_callable=_transform_and_load_geoapi_data,
+            python_callable=_transform_geoapi_data,
         )
 
         extractors >> transformer
 
-    responses = [
-        PythonOperator(
-            task_id=f'download_data_{data_id}',
-            python_callable=_get_forecast_for_random_loc,
-            op_kwargs={'data': data_id}
-        ) for data_id in ['1', '2', '3']
-    ]
+    fetch_representative_locations = PythonOperator(
+        task_id=f"fetch_representative_locations",
+        python_callable=_fetch_representative_locations
+    )
 
-    # choosing_hottest_loc = PythonOperator(
-    #     task_id="transform_data",
-    #     python_callable=_transform_data
-    # )
 
-    geoapi >> responses # >> choosing_hottest_loc
+    # responses = [
+    #     PythonOperator(
+    #         task_id=f'download_data_{data_id}',
+    #         python_callable=_get_forecast_for_random_loc,
+    #         op_kwargs={'data': data_id}
+    #     ) for data_id in ['1', '2', '3']
+    # ]
+
+    geoapi >> fetch_representative_locations # responses # >> choosing_hottest_loc
