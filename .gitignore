@@ -1,5 +1,4 @@
 airflow
-!airflow/dags
 data.csv
 
 # Byte-compiled / optimized / DLL files
