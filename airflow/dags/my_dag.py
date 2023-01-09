@@ -7,7 +7,7 @@ from airflow.models import Variable
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.bash import BashOperator
-from azure.storage.blob import ContainerClient
+from azure.storage.blob import ContainerClient, BlobServiceClient
 import pandas as pd
 
 from open_meteo.open_meto_api import OpenMetoClient
@@ -16,7 +16,7 @@ from geoapi import GeoApiClient
 logger = logging.getLogger(__name__)
 
 
-def _get_container_client() -> ContainerClient:
+def _get_blob_service_client(filename: str) -> BlobServiceClient:
     azure_blob_connection_string: str = Variable.get(
         "azure_blob_connection_string"
     ) 
@@ -24,10 +24,15 @@ def _get_container_client() -> ContainerClient:
         "azure_blob_container_name"
     )
 
-    return ContainerClient.from_connection_string(
-        conn_str=azure_blob_connection_string,
-        container_name=azure_blob_container_name
+    blob_service_client = BlobServiceClient.from_connection_string(
+        conn_str=azure_blob_connection_string
     )
+    blob_client = blob_service_client.get_blob_client(
+        container=azure_blob_container_name,
+        blob=filename
+    )
+
+    return blob_client
 
 
 def _get_forecast_for_random_loc():
@@ -71,10 +76,12 @@ def _transform_data(ti):
 
 
 def _upload_dataframe_to_blob(df: pd.DataFrame, filename: str) -> None:
-    container_client = _get_container_client()
-    df.to_parquet(f"./{filename}.parquet")
-    blob_client = container_client.get_blob_client(f"{filename}.parquet")
-    blob_client.upload_blob(f"./{filename}.parquet", overwrite=True)
+    from io import BytesIO
+    blob_service_client = _get_blob_service_client(filename=f"{filename}.parquet")
+    parquet_file = BytesIO()
+    df.to_parquet(parquet_file, engine='pyarrow')
+    parquet_file.seek(0)
+    blob_service_client.upload_blob(data=parquet_file)
 
 
 def _extract_geoapi_data(extractor_id: str) -> pd.DataFrame:
@@ -85,23 +92,34 @@ def _extract_geoapi_data(extractor_id: str) -> pd.DataFrame:
         offset=offset_mapping[extractor_id]
     )
     df: pd.DataFrame = geoapi_client.extract()
-    print(df.head(20))
+    print(df.head(20), df.dtypes)
   
-    _upload_dataframe_to_blob(df, filename=f"geoapi_extractor_{extractor_id}")
+    _upload_dataframe_to_blob(df, filename=f"geoapi_extracted_{extractor_id}")
 
-    return df.to_json(orient="records")
+    return df.to_json(orient='records')
 
 
-def _transform_geoapi_data(ti) -> pd.DataFrame:
+def _transform_and_load_geoapi_data(ti) -> pd.DataFrame:
     geoapi_data = ti.xcom_pull(task_ids=[
-        'geoapi_extractor_1',
-        'geoapi_extractor_2',
-        'geoapi_extractor_3',
-        'geoapi_extractor_4'
+        'geoapi_extract_transform_load.geoapi_extractor_1',
+        'geoapi_extract_transform_load.geoapi_extractor_2',
+        'geoapi_extract_transform_load.geoapi_extractor_3',
+        'geoapi_extract_transform_load.geoapi_extractor_4'
     ])
 
-    for data in geoapi_data:
-        print(type(data))
+    print("KKK")
+    print(geoapi_data)
+
+    df: pd.DataFrame = pd.DataFrame([])
+    df_extractor_data: pd.DataFrame
+
+    for extractor_data in geoapi_data:
+        df_extractor_data = pd.read_json(extractor_data, orient='records')
+        df = pd.concat([df, df_extractor_data], axis=0)
+
+    df.sort_values('population', ascending=False).reset_index(drop=True)
+
+    _upload_dataframe_to_blob(df, filename=f"geoapi_transformed")
 
 
 with DAG(
@@ -125,7 +143,7 @@ with DAG(
 
         transformer = PythonOperator(
             task_id=f"geoapi_transformer",
-            python_callable=_transform_geoapi_data,
+            python_callable=_transform_and_load_geoapi_data,
         )
 
         extractors >> transformer
@@ -138,10 +156,9 @@ with DAG(
         ) for data_id in ['1', '2', '3']
     ]
 
-    choosing_hottest_loc = PythonOperator(
-        task_id="transform_data",
-        python_callable=_transform_data
-    )
+    # choosing_hottest_loc = PythonOperator(
+    #     task_id="transform_data",
+    #     python_callable=_transform_data
+    # )
 
-    geoapi
-    geoapi >> responses >> choosing_hottest_loc
+    geoapi >> responses # >> choosing_hottest_loc
