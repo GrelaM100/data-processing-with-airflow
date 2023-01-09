@@ -5,7 +5,6 @@ from datetime import datetime
 
 from open_meteo.open_meto_api import OpenMetoClient
 
-
 # pxPkF83QxszbTnVk
 def _get_forecast_for_random_loc():
     import random
@@ -41,7 +40,7 @@ def _transform_data(ti):
                             'temperature': temperature})
 
     print(data_df)
-    data_df.to_csv('~/PycharmProjects/data-processing-with-airflow/data.csv')
+    data_df.to_csv('./data.csv')
     return data_df.to_json()
 
 
@@ -60,7 +59,7 @@ with DAG('get_forecast',
     )
     visualize = BashOperator(
         task_id="visualize",
-        bash_command="cat ~/PycharmProjects/data-processing-with-airflow/data.csv"
+        bash_command="cat ./data.csv"
     )
 
     responses >> choosing_hottest_loc >> visualize
