@@ -45,17 +45,39 @@ def _get_forecast_for_random_loc():
     return data
 
 
-def _transform_data(ti):
-    locations_data = ti.xcom_pull(task_ids=[
-        'download_data_1',
-        'download_data_2',
-        'download_data_3'
+def _get_forecast_for_locations(ti):
+    import json
+    client = OpenMetoClient()
+    representative = ti.xcom_pull(task_ids=[
+        'fetch_representative_locations'
+    ])
+
+    df_representative = pd.read_json(representative[0], orient='records')
+
+    forecasts = []
+    for _, row in df_representative.iterrows():
+        forecast = client.get_default_forecast_for_location(
+            latitude=row['latitude'],
+            longitude=row['longitude'],
+        )
+        forecasts.append((row['city'], forecast))
+    
+    return json.dumps(forecasts)
+
+
+def _transform_weather_forecasts(ti):
+    import json
+    city_locations_data = ti.xcom_pull(task_ids=[
+        'open_meteo_client'
     ])
 
     df: pd.DataFrame = pd.DataFrame([])
 
-    logger.info(f"Fetching data for {len(locations_data)} locations.")
-    for location_data in locations_data:
+    city_locations_data = json.loads(city_locations_data[0])
+    for city_specific_data in city_locations_data:
+        city = city_specific_data[0]
+        location_data = city_specific_data[1]
+
         latitude: float = location_data['latitude']
         longitude: float = location_data['longitude']
         datetime: List[float] = location_data['hourly']['time']
@@ -66,13 +88,15 @@ def _transform_data(ti):
             'datetime': datetime
         })
 
+        df_location_specific.insert(0, 'city', city)
         df_location_specific.insert(0, 'longitude', longitude)
         df_location_specific.insert(0, 'latitude', latitude)
 
         logger.info(f"Fetched data for location: ({latitude}, {longitude})")
         df = pd.concat([df, df_location_specific], axis=0)
-    
-    _upload_dataframe_to_blob(df, filename="raw")
+
+    df.reset_index(drop=True, inplace=True)
+    _upload_dataframe_to_blob(df, filename="forecasts")
 
 
 def _upload_dataframe_to_blob(df: pd.DataFrame, filename: str) -> None:
@@ -165,13 +189,14 @@ with DAG(
         python_callable=_fetch_representative_locations
     )
 
+    open_meteo_client = PythonOperator(
+        task_id='open_meteo_client',
+        python_callable=_get_forecast_for_locations
+    )
 
-    # responses = [
-    #     PythonOperator(
-    #         task_id=f'download_data_{data_id}',
-    #         python_callable=_get_forecast_for_random_loc,
-    #         op_kwargs={'data': data_id}
-    #     ) for data_id in ['1', '2', '3']
-    # ]
+    transform_weather_forecast = PythonOperator(
+        task_id='transform_wheater_forecast',
+        python_callable=_transform_weather_forecasts
+    )
 
-    geoapi >> fetch_representative_locations # responses # >> choosing_hottest_loc
+    geoapi >> fetch_representative_locations >> open_meteo_client >> transform_weather_forecast
