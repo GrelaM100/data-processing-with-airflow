@@ -2,6 +2,7 @@ import streamlit as st
 import datetime
 import pandas as pd
 import pydeck as pdk
+import altair as alt
 
 date_format = 'DD-MM-YYYY HH:mm'
 forecasts = pd.read_parquet('forecasts.parquet')
@@ -15,7 +16,6 @@ slider = st.slider('Select date',
                    max_value=end_date,
                    step=datetime.timedelta(hours=1),
                    format=date_format)
-
 
 plot_data = forecasts[forecasts['datetime'] == slider]
 plot_data['max_temp'] = plot_data['temperature'].max()
@@ -56,5 +56,17 @@ st.pydeck_chart(pdk.Deck(
     tooltip=tooltip)
 )
 
-
 st.dataframe(plot_data[['city', 'temperature']].reset_index(drop=True), width=400)
+st.markdown('''---''')
+option = st.selectbox('Select a city', plot_data['city'].sort_values(), index=35)
+
+data_selected_city = forecasts[forecasts['city'] == option]
+
+alt_chart = alt.Chart(data_selected_city).mark_line(
+    point=alt.OverlayMarkDef(color='#F63366'),
+    color='#262730'
+).encode(
+    x=alt.X('datetime', axis=alt.Axis(title='Time')),
+    y=alt.Y('temperature', axis=alt.Axis(title='Temperature')),
+).interactive()
+st.altair_chart(alt_chart, use_container_width=True)
