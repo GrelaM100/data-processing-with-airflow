@@ -4,6 +4,18 @@ import pandas as pd
 import pydeck as pdk
 import altair as alt
 
+
+def divide_warmer_colder_data(data):
+    warmer_data = data[data['temperature'] >= data['temperature'].median()]
+    colder_data = data[data['temperature'] < data['temperature'].median()]
+    warmer_data['min_temp'] = warmer_data['temperature'].min()
+    warmer_data['max_temp'] = warmer_data['temperature'].max()
+    colder_data['min_temp'] = colder_data['temperature'].min()
+    colder_data['max_temp'] = colder_data['temperature'].max()
+
+    return warmer_data, colder_data
+
+
 date_format = 'DD-MM-YYYY HH:mm'
 forecasts = pd.read_parquet('forecasts.parquet')
 forecasts['datetime'] = pd.to_datetime(forecasts['datetime'])
@@ -18,8 +30,8 @@ slider = st.slider('Select date',
                    format=date_format)
 
 plot_data = forecasts[forecasts['datetime'] == slider]
-plot_data['max_temp'] = plot_data['temperature'].max()
-plot_data['min_temp'] = plot_data['temperature'].min()
+warmer, colder = divide_warmer_colder_data(plot_data)
+
 tooltip = {
     "html":
         "<b>City:</b> {city} <br/>"
@@ -40,7 +52,7 @@ st.pydeck_chart(pdk.Deck(
     layers=[
         pdk.Layer(
             type='ScatterplotLayer',
-            data=plot_data,
+            data=warmer,
             pickable=True,
             opacity=0.8,
             radius_scale=6,
@@ -50,8 +62,22 @@ st.pydeck_chart(pdk.Deck(
             onClick=True,
             filled=True,
             get_position=['longitude', 'latitude'],
-            get_color=['((temperature - min_temp) * 255) / (max_temp - min_temp)', 0, 0],
-            get_line_color=[0, 0, 0])
+            get_color=['((temperature - min_temp) * 255) / (max_temp - min_temp)', '0', '0'],
+            get_line_color=[0, 0, 0]),
+        pdk.Layer(
+            type='ScatterplotLayer',
+            data=colder,
+            pickable=True,
+            opacity=0.8,
+            radius_scale=6,
+            radius_min_pixels=5,
+            radius_max_pixels=100,
+            line_width_min_pixels=1,
+            onClick=True,
+            filled=True,
+            get_position=['longitude', 'latitude'],
+            get_color=['0', '0', '255 - (((temperature - min_temp) * 255) / (max_temp - min_temp))'],
+            get_line_color=[0, 0, 0]),
     ],
     tooltip=tooltip)
 )
