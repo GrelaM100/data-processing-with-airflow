@@ -5,16 +5,124 @@ import pydeck as pdk
 import altair as alt
 
 
-def divide_warmer_colder_data(data):
-    warmer_data = data[data['temperature'] >= data['temperature'].median()]
-    colder_data = data[data['temperature'] < data['temperature'].median()]
-    warmer_data['min_temp'] = warmer_data['temperature'].min()
-    warmer_data['max_temp'] = warmer_data['temperature'].max()
-    colder_data['min_temp'] = colder_data['temperature'].min()
-    colder_data['max_temp'] = colder_data['temperature'].max()
+def divide_higher_lower_data(data, parameter):
+    higher_data = data[data[parameter] >= data[parameter].median()]
+    lower_data = data[data[parameter] < data[parameter].median()]
+    higher_data['min_val'] = higher_data[parameter].min()
+    higher_data['max_val'] = higher_data[parameter].max()
+    lower_data['min_val'] = lower_data[parameter].min()
+    lower_data['max_val'] = lower_data[parameter].max()
 
-    return warmer_data, colder_data
+    return higher_data, lower_data
 
+
+def prepare_visualization_for_parameter(parameter):
+    forecasts['parameter'] = forecasts[parameter]
+    plot_data = forecasts[forecasts['datetime'] == slider]
+    higher, lower = divide_higher_lower_data(plot_data, parameter)
+
+    if parameter == 'temperature' or parameter == 'apparent_temperature':
+        unit = '\N{DEGREE SIGN}C'
+    elif parameter == 'pressure':
+        unit = 'hPa'
+    elif parameter == 'cloudcover':
+        unit = '%'
+    else:
+        unit = 'km/h'
+
+    unit += '<br/>'
+
+    tooltip = {
+        "html":
+            "<b>City:</b> {city} <br/>"
+            f"<b>{parameter.capitalize()}:</b>"
+            "{parameter}"
+            f"{unit}",
+        "style": {
+            "backgroundColor": "steelblue",
+            "color": "black",
+        }
+    }
+
+    st.pydeck_chart(pdk.Deck(
+        map_provider='mapbox',
+        map_style='mapbox://styles/mapbox/light-v9',
+        initial_view_state=pdk.ViewState(
+            latitude=51.91,
+            longitude=19.14,
+            zoom=5
+        ),
+        layers=[
+            pdk.Layer(
+                type='ScatterplotLayer',
+                data=higher,
+                pickable=True,
+                opacity=0.8,
+                radius_scale=6,
+                radius_min_pixels=5,
+                radius_max_pixels=100,
+                line_width_min_pixels=1,
+                onClick=True,
+                filled=True,
+                get_position=['longitude', 'latitude'],
+                get_color=['((parameter - min_val) * 255) / (max_val - min_val)', '0', '0'],
+                get_line_color=[0, 0, 0]),
+            pdk.Layer(
+                type='ScatterplotLayer',
+                data=lower,
+                pickable=True,
+                opacity=0.8,
+                radius_scale=6,
+                radius_min_pixels=5,
+                radius_max_pixels=100,
+                line_width_min_pixels=1,
+                onClick=True,
+                filled=True,
+                get_position=['longitude', 'latitude'],
+                get_color=['0', '0', '255 - (((parameter - min_val) * 255) / (max_val - min_val))'],
+                get_line_color=[0, 0, 0]),
+        ],
+        tooltip=tooltip)
+    )
+
+    st.dataframe(plot_data[['city', parameter]].reset_index(drop=True), width=400)
+    st.markdown('''---''')
+    option = st.selectbox('Select a city', plot_data['city'].sort_values(), index=35)
+
+    data_selected_city = forecasts[forecasts['city'] == option]
+
+    alt_chart = alt.Chart(data_selected_city).mark_line(
+        point=alt.OverlayMarkDef(color='#F63366'),
+        color='#262730'
+    ).encode(
+        x=alt.X('datetime',
+                axis=alt.Axis(title='Time')),
+        y=alt.Y('parameter',
+                axis=alt.Axis(title=parameter.capitalize().replace('_', '  ')),
+                scale=alt.Scale(domain=[data_selected_city[parameter].min(), data_selected_city[parameter].max()])),
+    ).interactive()
+    st.altair_chart(alt_chart, use_container_width=True)
+
+
+with st.sidebar:
+    option = st.radio(
+        "Choose parameter",
+        ('Temperature',
+         'Apparent temperature',
+         'Pressure',
+         'Cloudcover',
+         'Windspeed'))
+
+    if option == 'Temperature':
+        parameter = 'temperature'
+    elif option == 'Apparent temperature':
+        parameter = 'apparent_temperature'
+    elif option == 'Pressure':
+        parameter = 'pressure'
+    elif option == 'Cloudcover':
+        parameter = 'cloudcover'
+    elif option == 'Windspeed':
+        parameter = 'windspeed'
 
 date_format = 'DD-MM-YYYY HH:mm'
 forecasts = pd.read_parquet('forecasts.parquet')
@@ -29,70 +137,4 @@ slider = st.slider('Select date',
                    step=datetime.timedelta(hours=1),
                    format=date_format)
 
-plot_data = forecasts[forecasts['datetime'] == slider]
-warmer, colder = divide_warmer_colder_data(plot_data)
-
-tooltip = {
-    "html":
-        "<b>City:</b> {city} <br/>"
-        "<b>Temperature:</b> {temperature}\N{DEGREE SIGN}C<br/>",
-    "style": {
-        "backgroundColor": "steelblue",
-        "color": "black",
-    }
-}
-st.pydeck_chart(pdk.Deck(
-    map_provider='mapbox',
-    map_style='mapbox://styles/mapbox/light-v9',
-    initial_view_state=pdk.ViewState(
-        latitude=51.91,
-        longitude=19.14,
-        zoom=5
-    ),
-    layers=[
-        pdk.Layer(
-            type='ScatterplotLayer',
-            data=warmer,
-            pickable=True,
-            opacity=0.8,
-            radius_scale=6,
-            radius_min_pixels=5,
-            radius_max_pixels=100,
-            line_width_min_pixels=1,
-            onClick=True,
-            filled=True,
-            get_position=['longitude', 'latitude'],
-            get_color=['((temperature - min_temp) * 255) / (max_temp - min_temp)', '0', '0'],
-            get_line_color=[0, 0, 0]),
-        pdk.Layer(
-            type='ScatterplotLayer',
-            data=colder,
-            pickable=True,
-            opacity=0.8,
-            radius_scale=6,
-            radius_min_pixels=5,
-            radius_max_pixels=100,
-            line_width_min_pixels=1,
-            onClick=True,
-            filled=True,
-            get_position=['longitude', 'latitude'],
-            get_color=['0', '0', '255 - (((temperature - min_temp) * 255) / (max_temp - min_temp))'],
-            get_line_color=[0, 0, 0]),
-    ],
-    tooltip=tooltip)
-)
-
-st.dataframe(plot_data[['city', 'temperature']].reset_index(drop=True), width=400)
-st.markdown('''---''')
-option = st.selectbox('Select a city', plot_data['city'].sort_values(), index=35)
-
-data_selected_city = forecasts[forecasts['city'] == option]
-
-alt_chart = alt.Chart(data_selected_city).mark_line(
-    point=alt.OverlayMarkDef(color='#F63366'),
-    color='#262730'
-).encode(
-    x=alt.X('datetime', axis=alt.Axis(title='Time')),
-    y=alt.Y('temperature', axis=alt.Axis(title='Temperature')),
-).interactive()
-st.altair_chart(alt_chart, use_container_width=True)
+prepare_visualization_for_parameter(parameter)
