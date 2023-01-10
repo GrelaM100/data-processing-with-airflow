@@ -38,19 +38,27 @@ def _get_blob_service_client(filename: str) -> BlobServiceClient:
 
 def _get_forecast_for_locations(ti):
     client = OpenMetoClient()
+    logger.info("OpenMeteoAPI client instanciated.")
     forecast = ti.xcom_pull(task_ids=[
-        'fetch_representative_locations'
+        'fetch_geographical_locations'
     ])
 
     df_representative = pd.read_json(forecast[0], orient='records')
 
     forecasts = []
-    for _, row in df_representative.iterrows():
+    for idx, (_, row) in enumerate(df_representative.iterrows(), start=1):
+        logger.info(f"Fetching data {idx}/{df_representative.shape[0]}...")
+        city: str = row['city']
+        population: int = row['population']
+        latitude: float = row['latitude']
+        longitude: float = row['longitude']
+
         forecast = client.get_default_forecast_for_location(
-            latitude=row['latitude'],
-            longitude=row['longitude'],
+            latitude=latitude,
+            longitude=longitude,
         )
-        forecasts.append((row['city'], forecast))
+        forecasts.append((city, population, forecast))
+        logger.info(f"Fetched data for {city} ({latitude}, {longitude})")
 
     return json.dumps(forecasts)
 
@@ -67,7 +75,8 @@ def _transform_weather_forecasts(ti) -> None:
     for idx, city_specific_forecast in enumerate(weather_forecasts, start=1):
         logger.info(f"Running transformation {idx}/{len(weather_forecasts)}")
         city = city_specific_forecast[0]
-        location_data = city_specific_forecast[1]
+        population = city_specific_forecast[1]
+        location_data = city_specific_forecast[2]
 
         latitude: float = location_data['latitude']
         longitude: float = location_data['longitude']
@@ -80,6 +89,7 @@ def _transform_weather_forecasts(ti) -> None:
         windspeed = hourly_data['windspeed_10m']
 
         df_location_specific = pd.DataFrame({
+            'population': population,
             'temperature': temperature,
             'apparent_temperature': apparent_temperature,
             'pressure': pressure,
@@ -95,7 +105,7 @@ def _transform_weather_forecasts(ti) -> None:
         logger.info(f"Transformed data for location: {city} ({latitude}, {longitude})")
         df = pd.concat([df, df_location_specific], axis=0)
 
-    logger.info(f"Finished transformations.")
+    logger.info("Finished transformations.")
     logger.info(df.head())
     df.reset_index(drop=True, inplace=True)
     _upload_dataframe_to_blob(df, filename="forecasts")
@@ -146,17 +156,59 @@ def _transform_geoapi_data(ti) -> pd.DataFrame:
     _upload_dataframe_to_blob(df, filename="geoapi_transformed")
 
 
-def _fetch_representative_locations() -> pd.DataFrame:
-    filename = "geoapi_transformed.parquet"
+def _download_dataframe_from_blob(filename: str) -> pd.DataFrame:
     blob_service_client = _get_blob_service_client(filename=filename)
     with BytesIO() as input_blob:
         blob_service_client.download_blob().download_to_stream(input_blob)
         input_blob.seek(0)
-        df = pd.read_parquet(input_blob)
+        return pd.read_parquet(input_blob)
 
-    print(df.head(50))
-    df_representative = df[:100]
-    return df_representative.to_json(orient='records')
+
+def _fetch_geographical_locations() -> pd.DataFrame:
+    filename = "geoapi_transformed.parquet"
+    df: pd.DataFrame = _download_dataframe_from_blob(filename)
+    df = df[:200]
+    return df.to_json(orient='records')
+
+
+def _expose_forecasts_for_biggest_cities() -> None:
+    filename = "forecasts.parquet"
+    df: pd.DataFrame = _download_dataframe_from_blob(filename)
+    biggest_cities: List[str] = (
+        df
+        .groupby(by=['city', 'population'], as_index=False)
+        .first()[['city', 'population']]
+        .sort_values('population', ascending=False)
+        .head(100)['city']
+        .values
+    )
+
+    df_biggest_cities = df[
+        df['city'].isin(biggest_cities)
+    ].drop_duplicates().reset_index(drop=True)
+
+    _upload_dataframe_to_blob(
+        df_biggest_cities, filename="forecast_biggest_cities")
+
+
+def _expose_forecasts_for_smallest_cities() -> None:
+    filename = "forecasts.parquet"
+    df: pd.DataFrame = _download_dataframe_from_blob(filename)
+    smallest_cities: List[str] = (
+        df
+        .groupby(by=['city', 'population'], as_index=False)
+        .first()[['city', 'population']]
+        .sort_values('population', ascending=False)
+        .tail(100)['city']
+        .values
+    )
+
+    df_smallest_cities = df[
+        df['city'].isin(smallest_cities)
+    ].drop_duplicates().reset_index(drop=True)
+
+    _upload_dataframe_to_blob(
+        df_smallest_cities, filename="forecast_smallest_cities")
 
 
 with DAG(
@@ -184,9 +236,9 @@ with DAG(
 
         extractors >> transformer
 
-    fetch_representative_locations = PythonOperator(
-        task_id="fetch_representative_locations",
-        python_callable=_fetch_representative_locations
+    fetch_geographical_locations = PythonOperator(
+        task_id="fetch_geographical_locations",
+        python_callable=_fetch_geographical_locations
     )
 
     run_open_meteo_client = PythonOperator(
@@ -199,5 +251,16 @@ with DAG(
         python_callable=_transform_weather_forecasts
     )
 
-    geoapi >> fetch_representative_locations >> \
-        run_open_meteo_client >> transform_weather_forecast
+    with TaskGroup(group_id="analytics") as analytics:
+        expose_forecasts_for_biggest_cities = PythonOperator(
+            task_id='expose_forecasts_for_biggest_cities',
+            python_callable=_expose_forecasts_for_biggest_cities
+        )
+
+        expose_forecasts_for_smallest_cities = PythonOperator(
+            task_id='expose_forecasts_for_smallest_cities',
+            python_callable=_expose_forecasts_for_smallest_cities
+        )
+
+    geoapi >> fetch_geographical_locations >> \
+        run_open_meteo_client >> transform_weather_forecast >> analytics
