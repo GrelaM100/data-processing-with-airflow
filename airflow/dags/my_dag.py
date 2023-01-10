@@ -1,3 +1,5 @@
+import json
+from io import BytesIO
 from typing import List
 from datetime import datetime
 import logging
@@ -5,9 +7,8 @@ import logging
 from airflow import DAG
 from airflow.models import Variable
 from airflow.utils.task_group import TaskGroup
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.bash import BashOperator
-from azure.storage.blob import ContainerClient, BlobServiceClient
+from airflow.operators.python import PythonOperator
+from azure.storage.blob import BlobServiceClient
 import pandas as pd
 
 from open_meteo.open_meto_api import OpenMetoClient
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 def _get_blob_service_client(filename: str) -> BlobServiceClient:
     azure_blob_connection_string: str = Variable.get(
         "azure_blob_connection_string"
-    ) 
+    )
     azure_blob_container_name: str = Variable.get(
         "azure_blob_container_name"
     )
@@ -35,24 +36,13 @@ def _get_blob_service_client(filename: str) -> BlobServiceClient:
     return blob_client
 
 
-def _get_forecast_for_random_loc():
-    import random
-    client = OpenMetoClient()
-    longitude = round(random.uniform(-180, 180), 2)
-    latitude = round(random.uniform(-90, 90), 2)
-    data = client.get_default_forecast_for_location(longitude, latitude)
-
-    return data
-
-
 def _get_forecast_for_locations(ti):
-    import json
     client = OpenMetoClient()
-    representative = ti.xcom_pull(task_ids=[
+    forecast = ti.xcom_pull(task_ids=[
         'fetch_representative_locations'
     ])
 
-    df_representative = pd.read_json(representative[0], orient='records')
+    df_representative = pd.read_json(forecast[0], orient='records')
 
     forecasts = []
     for _, row in df_representative.iterrows():
@@ -61,14 +51,13 @@ def _get_forecast_for_locations(ti):
             longitude=row['longitude'],
         )
         forecasts.append((row['city'], forecast))
-    
+
     return json.dumps(forecasts)
 
 
-def _transform_weather_forecasts(ti):
-    import json
+def _transform_weather_forecasts(ti) -> None:
     city_locations_data = ti.xcom_pull(task_ids=[
-        'open_meteo_client'
+        'run_open_meteo_client'
     ])
 
     df: pd.DataFrame = pd.DataFrame([])
@@ -100,8 +89,8 @@ def _transform_weather_forecasts(ti):
 
 
 def _upload_dataframe_to_blob(df: pd.DataFrame, filename: str) -> None:
-    from io import BytesIO
-    blob_service_client = _get_blob_service_client(filename=f"{filename}.parquet")
+    blob_service_client = \
+        _get_blob_service_client(filename=f"{filename}.parquet")
     parquet_file = BytesIO()
     df.to_parquet(parquet_file, engine='pyarrow')
     parquet_file.seek(0)
@@ -110,14 +99,14 @@ def _upload_dataframe_to_blob(df: pd.DataFrame, filename: str) -> None:
 
 def _extract_geoapi_data(extractor_id: str) -> pd.DataFrame:
     logger.info(f"Initializing GeoAPI extractor with ID {extractor_id}")
-    offset_mapping = {'1': 0, '2':700, '3':1400, '4':2100}
+    offset_mapping = {'1': 0, '2': 700, '3': 1400, '4': 2100}
     geoapi_client = GeoApiClient(
         country="Poland",
         offset=offset_mapping[extractor_id]
     )
     df: pd.DataFrame = geoapi_client.extract()
     print(df.head(20), df.dtypes)
-  
+
     _upload_dataframe_to_blob(df, filename=f"geoapi_extracted_{extractor_id}")
 
     return df.to_json(orient='records')
@@ -141,18 +130,17 @@ def _transform_geoapi_data(ti) -> pd.DataFrame:
     df = df.sort_values('population', ascending=False).reset_index(drop=True)
     print(df.head(50))
 
-    _upload_dataframe_to_blob(df, filename=f"geoapi_transformed")
+    _upload_dataframe_to_blob(df, filename="geoapi_transformed")
 
 
 def _fetch_representative_locations() -> pd.DataFrame:
-    from io import BytesIO
     filename = "geoapi_transformed.parquet"
     blob_service_client = _get_blob_service_client(filename=filename)
     with BytesIO() as input_blob:
         blob_service_client.download_blob().download_to_stream(input_blob)
         input_blob.seek(0)
         df = pd.read_parquet(input_blob)
-    
+
     print(df.head(50))
     df_representative = df[:100]
     return df_representative.to_json(orient='records')
@@ -161,10 +149,9 @@ def _fetch_representative_locations() -> pd.DataFrame:
 with DAG(
         'get_forecast',
         start_date=datetime(2022, 12, 19),
-        schedule_interval='* * * * *',
+        schedule_interval='0 */3 * * *',
         catchup=False
-    ) as dag:
-
+        ) as dag:
 
     with TaskGroup(group_id="geoapi_extract_transform_load") as geoapi:
         extractors = [
@@ -178,19 +165,19 @@ with DAG(
         ]
 
         transformer = PythonOperator(
-            task_id=f"geoapi_transformer",
+            task_id="geoapi_transformer",
             python_callable=_transform_geoapi_data,
         )
 
         extractors >> transformer
 
     fetch_representative_locations = PythonOperator(
-        task_id=f"fetch_representative_locations",
+        task_id="fetch_representative_locations",
         python_callable=_fetch_representative_locations
     )
 
-    open_meteo_client = PythonOperator(
-        task_id='open_meteo_client',
+    run_open_meteo_client = PythonOperator(
+        task_id='run_open_meteo_client',
         python_callable=_get_forecast_for_locations
     )
 
@@ -199,4 +186,5 @@ with DAG(
         python_callable=_transform_weather_forecasts
     )
 
-    geoapi >> fetch_representative_locations >> open_meteo_client >> transform_weather_forecast
+    geoapi >> fetch_representative_locations >> \
+        run_open_meteo_client >> transform_weather_forecast
