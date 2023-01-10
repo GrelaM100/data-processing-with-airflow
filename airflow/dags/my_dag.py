@@ -56,34 +56,47 @@ def _get_forecast_for_locations(ti):
 
 
 def _transform_weather_forecasts(ti) -> None:
-    city_locations_data = ti.xcom_pull(task_ids=[
+    weather_forecasts = ti.xcom_pull(task_ids=[
         'run_open_meteo_client'
     ])
 
     df: pd.DataFrame = pd.DataFrame([])
 
-    city_locations_data = json.loads(city_locations_data[0])
-    for city_specific_data in city_locations_data:
-        city = city_specific_data[0]
-        location_data = city_specific_data[1]
+    weather_forecasts = json.loads(weather_forecasts[0])
+    logger.info(f"Transforming forecast data for {len(weather_forecasts)} cities.")
+    for idx, city_specific_forecast in enumerate(weather_forecasts, start=1):
+        logger.info(f"Running transformation {idx}/{len(weather_forecasts)}")
+        city = city_specific_forecast[0]
+        location_data = city_specific_forecast[1]
 
         latitude: float = location_data['latitude']
         longitude: float = location_data['longitude']
-        datetime: List[float] = location_data['hourly']['time']
-        temperature: List[float] = location_data['hourly']['temperature_2m']
+        hourly_data = location_data['hourly']
+        datetime: List[float] = hourly_data['time']
+        temperature: List[float] = hourly_data['temperature_2m']
+        apparent_temperature: List[float] = hourly_data['apparent_temperature']
+        pressure: List[float] = hourly_data['pressure_msl']
+        cloudcover: List[int] = hourly_data['cloudcover']
+        windspeed = hourly_data['windspeed_10m']
 
         df_location_specific = pd.DataFrame({
             'temperature': temperature,
-            'datetime': datetime
+            'apparent_temperature': apparent_temperature,
+            'pressure': pressure,
+            'cloudcover': cloudcover,
+            'windspeed': windspeed,
+            'datetime': datetime,
         })
 
         df_location_specific.insert(0, 'city', city)
         df_location_specific.insert(0, 'longitude', longitude)
         df_location_specific.insert(0, 'latitude', latitude)
 
-        logger.info(f"Fetched data for location: ({latitude}, {longitude})")
+        logger.info(f"Transformed data for location: {city} ({latitude}, {longitude})")
         df = pd.concat([df, df_location_specific], axis=0)
 
+    logger.info(f"Finished transformations.")
+    logger.info(df.head())
     df.reset_index(drop=True, inplace=True)
     _upload_dataframe_to_blob(df, filename="forecasts")
 
